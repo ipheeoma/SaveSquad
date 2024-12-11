@@ -2,22 +2,23 @@
 ;; A community-driven savings mechanism with rotating withdrawals
 
 (define-constant CONTRACT-OWNER tx-sender)
-
-;; Error Codes
 (define-constant ERROR-UNAUTHORIZED (err u1))
-(define-constant ERROR-ALREADY-PARTICIPANT (err u2))
-(define-constant ERROR-NOT-PARTICIPANT (err u3))
-(define-constant ERROR-INSUFFICIENT-FUNDS (err u4))
-(define-constant ERROR-INVALID-WITHDRAWAL (err u5))
+(define-constant ERROR-INSUFFICIENT-FUNDS (err u2))
+(define-constant ERROR-ALREADY-PARTICIPANT (err u3))
+(define-constant ERROR-NOT-PARTICIPANT (err u4))
+(define-constant ERROR-CYCLE-INCOMPLETE (err u5))
+(define-constant ERROR-INVALID-WITHDRAWAL (err u6))
+(define-constant ERROR-INVALID-PARTICIPANT-COUNT (err u7))
+(define-constant ERROR-INVALID-CONTRIBUTION-AMOUNT (err u8))
 
-;; Pool Configuration
-(define-data-var participant-limit uint u10)
-(define-data-var contribution-amount uint u100)
-(define-data-var current-cycle uint u0)
+;; Storage for pool parameters and state
+(define-data-var participant-limit uint u0)
+(define-data-var required-contribution uint u0)
+(define-data-var current-cycle-number uint u0)
 (define-data-var total-pool-funds uint u0)
 
-;; Participant Tracking
-(define-map participants 
+;; Map to track participants
+(define-map pool-participants 
   principal 
   {
     is-active: bool,
@@ -26,50 +27,45 @@
   }
 )
 
-;; Cycle Payout Information
-(define-map cycle-payouts 
+;; Map to track cycle details
+(define-map cycle-payout-info 
   uint  ;; cycle number
   {
-    recipient: principal,
-    has-withdrawn: bool
+    payout-recipient: principal,
+    has-received-payout: bool
   }
 )
 
-;; Initialize the Savings Pool
-(define-public (initialize-pool 
-  (max-participants uint) 
-  (monthly-contribution uint))
+;; Initialize the savings pool
+(define-public (initialize-pool (max-participants uint) (contribution-amount uint))
   (begin
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERROR-UNAUTHORIZED)
+    ;; Check that max-participants is greater than 0
+    (asserts! (> max-participants u0) ERROR-INVALID-PARTICIPANT-COUNT)
+    ;; Check that contribution-amount is greater than 0
+    (asserts! (> contribution-amount u0) ERROR-INVALID-CONTRIBUTION-AMOUNT)
     (var-set participant-limit max-participants)
-    (var-set contribution-amount monthly-contribution)
+    (var-set required-contribution contribution-amount)
     (ok true)
   )
 )
 
-;; Join the Savings Pool
+;; Join the savings pool
 (define-public (join-pool)
   (let 
     (
       (participant-data 
         (default-to 
           {is-active: false, total-contributed: u0, last-contribution-cycle: u0}
-          (map-get? participants tx-sender)
+          (map-get? pool-participants tx-sender)
         )
       )
-      (current-participants 
-        (len (filter is-active-participant (map-keys participants)))
-      )
     )
-    ;; Validate participation
-    (asserts! 
-      (< current-participants (var-get participant-limit)) 
-      ERROR-ALREADY-PARTICIPANT
-    )
+    ;; Check if already a participant
     (asserts! (not (get is-active participant-data)) ERROR-ALREADY-PARTICIPANT)
     
-    ;; Add participant
-    (map-set participants tx-sender 
+    ;; Add participant to the pool
+    (map-set pool-participants tx-sender 
       {
         is-active: true, 
         total-contributed: u0, 
@@ -80,123 +76,99 @@
   )
 )
 
-;; Contribute to the Pool
+;; Contribute to the pool
 (define-public (contribute)
   (let 
     (
-      (current-cycle-number (var-get current-cycle))
-      (monthly-contribution (var-get contribution-amount))
+      (current-cycle (var-get current-cycle-number))
+      (contribution-amount (var-get required-contribution))
       (participant-data 
         (unwrap! 
-          (map-get? participants tx-sender) 
+          (map-get? pool-participants tx-sender) 
           ERROR-NOT-PARTICIPANT
         )
       )
     )
-    ;; Validate contribution
+    ;; Verify participant is active and hasn't already contributed this cycle
     (asserts! (get is-active participant-data) ERROR-NOT-PARTICIPANT)
     (asserts! 
-      (not (is-eq (get last-contribution-cycle participant-data) current-cycle-number)) 
+      (not (is-eq (get last-contribution-cycle participant-data) current-cycle)) 
       ERROR-ALREADY-PARTICIPANT
     )
     
     ;; Transfer contribution
-    (try! (stx-transfer? monthly-contribution tx-sender (as-contract tx-sender)))
+    (try! (stx-transfer? contribution-amount tx-sender (as-contract tx-sender)))
     
-    ;; Update participant state
-    (map-set participants tx-sender 
+    ;; Update participant and pool state
+    (map-set pool-participants tx-sender 
       {
         is-active: true,
-        total-contributed: (+ (get total-contributed participant-data) monthly-contribution),
-        last-contribution-cycle: current-cycle-number
+        total-contributed: (+ (get total-contributed participant-data) contribution-amount),
+        last-contribution-cycle: current-cycle
       }
     )
     
-    ;; Update pool funds
+    ;; Update total pool funds
     (var-set total-pool-funds 
-      (+ (var-get total-pool-funds) monthly-contribution)
+      (+ (var-get total-pool-funds) contribution-amount)
     )
     
     (ok true)
   )
 )
 
-;; Select Next Payout Recipient
+;; Select next payout recipient (simplified randomness)
 (define-public (select-payout-recipient)
   (let 
     (
-      (current-cycle-number (var-get current-cycle))
-      (active-participants 
-        (filter 
-          is-active-participant 
-          (map-keys participants)
-        )
-      )
+      (current-cycle (var-get current-cycle-number))
+      (total-participants (var-get participant-limit))
     )
-    ;; Only contract owner can select recipient
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERROR-UNAUTHORIZED)
     
-    ;; Require at least one active participant
-    (asserts! (> (len active-participants) u0) ERROR-INSUFFICIENT-FUNDS)
-    
-    ;; Pseudorandom recipient selection
-    (let 
-      (
-        (recipient 
-          (default-to 
-            CONTRACT-OWNER 
-            (element-at 
-              active-participants 
-              (mod current-cycle-number (len active-participants))
-            )
-          )
-        )
-      )
-      ;; Record payout information
-      (map-set cycle-payouts current-cycle-number 
-        {
-          recipient: recipient,
-          has-withdrawn: false
-        }
-      )
-      
-      ;; Increment cycle
-      (var-set current-cycle (+ current-cycle-number u1))
-      
-      (ok true)
+    ;; In a real-world scenario, use a more robust randomness mechanism
+    (map-set cycle-payout-info current-cycle 
+      {
+        payout-recipient: CONTRACT-OWNER,  ;; Placeholder - replace with actual selection logic
+        has-received-payout: false
+      }
     )
+    
+    ;; Increment cycle
+    (var-set current-cycle-number (+ current-cycle u1))
+    
+    (ok true)
   )
 )
 
-;; Withdraw Pool Funds
+;; Withdraw pool funds
 (define-public (withdraw-payout)
   (let 
     (
-      (current-cycle-number (var-get current-cycle))
-      (payout-cycle (- current-cycle-number u1))
-      (payout-info 
+      (current-cycle (var-get current-cycle-number))
+      (payout-data 
         (unwrap! 
-          (map-get? cycle-payouts payout-cycle) 
-          ERROR-INVALID-WITHDRAWAL
+          (map-get? cycle-payout-info (- current-cycle u1)) 
+          ERROR-CYCLE-INCOMPLETE
         )
       )
-      (pool-funds (var-get total-pool-funds))
+      (payout-amount (var-get total-pool-funds))
     )
-    ;; Validate withdrawal
+    ;; Verify withdrawal eligibility
     (asserts! 
-      (is-eq (get recipient payout-info) tx-sender) 
-      ERROR-UNAUTHORIZED
+      (is-eq (get payout-recipient payout-data) tx-sender) 
+      ERROR-INVALID-WITHDRAWAL
     )
-    (asserts! (not (get has-withdrawn payout-info)) ERROR-INVALID-WITHDRAWAL)
+    (asserts! (not (get has-received-payout payout-data)) ERROR-INVALID-WITHDRAWAL)
     
-    ;; Transfer funds
-    (try! (as-contract (stx-transfer? pool-funds (as-contract tx-sender) tx-sender)))
+    ;; Transfer pool funds
+    (try! (as-contract (stx-transfer? payout-amount (as-contract tx-sender) tx-sender)))
     
     ;; Update payout status
-    (map-set cycle-payouts payout-cycle 
+    (map-set cycle-payout-info (- current-cycle u1)
       {
-        recipient: tx-sender,
-        has-withdrawn: true
+        payout-recipient: tx-sender,
+        has-received-payout: true
       }
     )
     
@@ -207,26 +179,17 @@
   )
 )
 
-;; Helper function to check if participant is active
-(define-private (is-active-participant (participant principal))
-  (default-to false 
-    (map-get? 
-      (lambda (data) (get is-active data)) 
-      (map-get? participants participant)
-    )
-  )
-)
-
-;; Read-only Functions
+;; Read-only function to check participant details
 (define-read-only (get-participant-info (participant principal))
-  (map-get? participants participant)
+  (map-get? pool-participants participant)
 )
 
+;; Read-only function to get current pool status
 (define-read-only (get-pool-status)
   {
-    current-cycle: (var-get current-cycle),
+    current-cycle: (var-get current-cycle-number),
     total-pool-funds: (var-get total-pool-funds),
     participant-limit: (var-get participant-limit),
-    contribution-amount: (var-get contribution-amount)
+    required-contribution: (var-get required-contribution)
   }
 )
