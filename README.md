@@ -9,7 +9,7 @@ SaveSquad is a community-driven decentralized savings mechanism built on the Sta
 - **Participant Limit**: Restricts the number of participants to ensure pool manageability
 - **Fixed Monthly Contributions**: Standardized contribution amount for all participants
 - **Rotating Withdrawal System**: Pseudorandom selection of payout recipient each cycle
-- **Transparent Governance**: Contract owner manages critical pool operations
+- **Transparent Governance**: Contract owner manages critical pool operations.
 
 ## Contract Workflow
 
