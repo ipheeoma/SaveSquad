@@ -1,116 +1,135 @@
 # SaveSquad Decentralized Savings Pool
 
 ## Overview
-
-SaveSquad is a community-driven decentralized savings mechanism built on the Stacks blockchain. The smart contract enables a rotating savings pool where participants contribute monthly and take turns receiving the collective funds.
+SaveSquad is a decentralized savings pool smart contract implemented on the Stacks blockchain. The goal is to allow participants to pool contributions in various supported currencies and withdraw funds on a cyclic basis. The contract features referral rewards, token whitelisting, and improved type safety for better reliability.
 
 ## Key Features
+- **Savings Pool:** Members can join and contribute to a savings pool, which is managed on a cycle-based system.
+- **Referral Program:** Encourages participation by rewarding members who bring in new users.
+- **Multi-Currency Support:** Allows contributions in different tokens, with on-the-fly conversion.
+- **Type Safety:** Uses a custom fungible token trait and strong parameter validation.
+- **Oracle Integration:** Enables dynamic pricing for token conversions.
+- **Whitelisted Tokens:** Only approved tokens can be used within the contract.
 
-- **Participant Limit**: Restricts the number of participants to ensure pool manageability
-- **Fixed Monthly Contributions**: Standardized contribution amount for all participants
-- **Rotating Withdrawal System**: Pseudorandom selection of payout recipient each cycle
-- **Transparent Governance**: Contract owner manages critical pool operations
+## Error Codes
+| Code | Description                         |
+|------|-------------------------------------|
+| `u1` | Not authorized                      |
+| `u2` | Insufficient funds                  |
+| `u3` | Already a member                    |
+| `u4` | Not a member                        |
+| `u5` | Cycle not complete                  |
+| `u6` | Invalid withdrawal                  |
+| `u7` | Invalid pool size                   |
+| `u8` | Invalid contribution                |
+| `u9` | Invalid currency                    |
+| `u10`| Oracle error                        |
+| `u11`| Referral not found                  |
+| `u12`| Conversion failed                   |
+| `u13`| Token contract not found            |
+| `u14`| Invalid parameter                   |
+| `u15`| Invalid token                       |
 
-## Contract Workflow
+## Contract Constants
+- `CONTRACT-OWNER`: The address of the contract owner.
+- `ERR-*`: Predefined error codes.
+- `referral-bonus-percentage`: Default 5% bonus for referrals.
+- `max-referral-bonus`: Maximum bonus amount per referral, set to 100,000 microSTX.
 
-### 1. Pool Initialization
-- Contract owner sets:
-  - Maximum number of participants
-  - Monthly contribution amount
+## Storage Structures
+### Pool Parameters
+- `pool-size`: Number of members allowed in the pool.
+- `contribution-amount`: Amount each member must contribute per cycle.
+- `current-cycle`: Tracks the current contribution cycle.
+- `total-pool-balance`: The total balance of the pool.
+- `oracle-address`: Address of the price oracle.
 
-### 2. Participant Onboarding
-- Users can join the pool if:
-  - Total participants are below the limit
-  - They are not already a participant
+### Supported Currencies
+- Stored in `supported-currencies` map with:
+  - `is-active`: Whether the currency is active.
+  - `decimals`: Decimal precision of the token.
+  - `min-amount`: Minimum contribution amount.
+  - `price-multiplier`: Conversion factor.
+  - `token-principal`: Token contract address.
 
-### 3. Monthly Contributions
-- Active participants contribute a fixed monthly amount
-- Contributions are pooled and tracked
-- Each participant can contribute only once per cycle
+### Members
+- Stored in `members` map with:
+  - `is-active`: Whether the member is active.
+  - `total-contributions`: Total contributions by the member.
+  - `last-contribution-cycle`: The last cycle when the member contributed.
+  - `referrer`: Referring member.
+  - `referral-count`: Number of referrals made by the member.
+  - `bonus-balance`: Referral bonus balance.
 
-### 4. Payout Recipient Selection
-- Contract owner selects the next payout recipient
-- Selection uses a pseudorandom mechanism based on cycle number
-- Ensures fair distribution of funds
+### Cycle Withdrawals
+- Stored in `cycle-withdrawals` map with:
+  - `selected-member`: Member selected for withdrawal.
+  - `is-withdrawn`: Whether the withdrawal has been processed.
+  - `withdrawal-currency`: Currency used for withdrawal.
 
-### 5. Withdrawal
-- Selected recipient can withdraw the total pooled funds
-- Each recipient can withdraw only once per cycle
+### Whitelisted Tokens
+- `whitelisted-tokens`: Tracks approved tokens by principal.
 
-## Smart Contract Functions
+## Core Functions
+### Public Functions
+1. **`initialize-pool(size uint, contribution uint)`**
+   - Initializes the pool with a size and contribution amount.
+   - Only callable by the contract owner.
 
-### Initialization
-- `initialize-pool(max-participants, monthly-contribution)`
-  - Sets up the savings pool parameters
-  - Can only be called by contract owner
+2. **`set-oracle-address(new-oracle principal)`**
+   - Updates the oracle address.
+   - Only callable by the contract owner.
 
-### Participant Management
-- `join-pool()`
-  - Allows a new participant to join the savings pool
-  - Checks participant limit and existing membership
+3. **`join-pool(referrer (optional principal))`**
+   - Allows a user to join the pool with an optional referrer.
 
-### Contribution
-- `contribute()`
-  - Participants deposit their monthly contribution
-  - Validates contribution eligibility
-  - Updates pool funds
+4. **`contribute-in-currency(currency (string-ascii 10), token <ft-trait>)`**
+   - Contribute to the pool in the specified currency using a whitelisted token.
 
-### Payout Management
-- `select-payout-recipient()`
-  - Chooses the next recipient for fund withdrawal
-  - Increments the current cycle
-  - Can only be called by contract owner
+5. **`withdraw(token <ft-trait>)`**
+   - Allows a selected member to withdraw pool funds at the end of a cycle.
 
-- `withdraw-payout()`
-  - Allows the selected recipient to withdraw pool funds
-  - Validates withdrawal eligibility
-  - Resets pool funds after withdrawal
+### Private Functions
+1. **`is-whitelisted-token(token-principal principal)`**
+   - Checks if a token is whitelisted.
 
-## Read-Only Functions
+2. **`update-referrer-stats(referrer principal)`**
+   - Updates referral statistics for a referring member.
 
-- `get-participant-info(participant)`
-  - Retrieves detailed information about a specific participant
+3. **`calculate-referral-bonus()`**
+   - Calculates the referral bonus for a contribution.
 
-- `get-pool-status()`
-  - Provides an overview of the current pool state
-  - Includes cycle, total funds, participant limit, and contribution amount
+4. **`get-converted-amount(currency (string-ascii 10), amount uint)`**
+   - Converts a given amount based on the currency's price multiplier.
 
-## Error Handling
+### Read-Only Functions
+1. **`get-member-info(member principal)`**
+   - Fetches information about a member.
 
-The contract implements robust error handling with specific error codes:
-- `ERROR-UNAUTHORIZED`: Prevents unauthorized actions
-- `ERROR-ALREADY-PARTICIPANT`: Stops duplicate participation
-- `ERROR-NOT-PARTICIPANT`: Ensures only pool members can perform actions
-- `ERROR-INSUFFICIENT-FUNDS`: Prevents operations with insufficient pool resources
-- `ERROR-INVALID-WITHDRAWAL`: Manages withdrawal constraints
+2. **`get-pool-status()`**
+   - Provides the current pool status, including size, contributions, and balance.
 
-## Use Cases
+3. **`get-currency-info(currency (string-ascii 10))`**
+   - Returns information about a supported currency.
 
-- **Community Savings**: Local groups can create collaborative savings mechanisms
-- **Rotating Credit Associations**: Enables structured, transparent fund sharing
-- **Financial Inclusion**: Provides a decentralized alternative to traditional savings models
+4. **`get-referral-program-info()`**
+   - Returns details about the referral program.
+
+5. **`is-token-whitelisted(token-principal principal)`**
+   - Checks if a token is whitelisted.
+
+## Deployment Instructions
+1. Deploy the contract on the Stacks blockchain using a compatible Clarity IDE.
+2. Initialize the pool using `initialize-pool` with desired size and contribution amount.
+3. Configure supported currencies and whitelisted tokens.
+4. Add an oracle address using `set-oracle-address`.
 
 ## Security Considerations
+- Only authorized addresses can modify pool configurations.
+- Contributions are validated using token whitelisting and price multipliers.
+- Referral bonuses are capped to prevent abuse.
 
-- Only contract owner can initialize and manage critical pool operations
-- Pseudorandom recipient selection ensures fairness
-- Strict validation at each step prevents misuse
-
-## Deployment Prerequisites
-
-- Stacks blockchain environment
-- Minimum STX balance for contract deployment and participant contributions
-
-## Example Deployment Scenario
-
-1. Contract owner deploys SaveSquad with:
-   - 10 participant limit
-   - 100 STX monthly contribution
-
-2. Participants join and contribute monthly
-3. Each cycle, a new participant is selected to receive funds
-4. Funds are withdrawn, and the cycle continues
-
-## Contributing
-
-Contributions, bug reports, and feature requests are welcome. Please submit issues or pull requests on the project repository.
+## Future Enhancements
+- Dynamic cycle durations.
+- Improved oracle integration for real-time token pricing.
+- Support for non-fungible token rewards.

@@ -1,5 +1,5 @@
 ;; SaveSquad Decentralized Savings Pool
-;; Version with proper trait handling
+;; Version with improved type safety and checked data
 
 ;; Define a simplified local FT trait
 (define-trait ft-trait
@@ -25,6 +25,8 @@
 (define-constant ERR-REFERRAL-NOT-FOUND (err u11))
 (define-constant ERR-CONVERSION-FAILED (err u12))
 (define-constant ERR-TOKEN-CONTRACT-NOT-FOUND (err u13))
+(define-constant ERR-INVALID-PARAMETER (err u14))
+(define-constant ERR-INVALID-TOKEN (err u15))
 
 ;; Storage for pool parameters and state
 (define-data-var pool-size uint u0)
@@ -33,7 +35,7 @@
 (define-data-var total-pool-balance uint u0)
 (define-data-var oracle-address principal 'SP000000000000000000002Q6VF78)
 
-;; Supported currencies map - modified to store contract identifier
+;; Supported currencies map - modified to store principal instead of string
 (define-map supported-currencies
   {currency: (string-ascii 10)}
   {
@@ -41,9 +43,14 @@
     decimals: uint,
     min-amount: uint,
     price-multiplier: uint,
-    token-contract: (optional (string-ascii 40))  ;; Store contract identifier instead of principal
+    token-principal: (optional principal)  ;; Store the actual principal instead of string
   }
 )
+
+;; Add a map to track whitelisted tokens
+(define-map whitelisted-tokens
+  principal
+  bool)
 
 ;; Member structure with referral tracking
 (define-map members 
@@ -84,33 +91,16 @@
   )
 )
 
-;; Add supported currency
-(define-public (add-supported-currency 
-    (currency (string-ascii 10)) 
-    (decimals uint) 
-    (min-amount uint)
-    (price-multiplier uint)
-    (token-contract (optional (string-ascii 40)))
-  )
-  (begin
-    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
-    (map-set supported-currencies {currency: currency}
-      {
-        is-active: true,
-        decimals: decimals,
-        min-amount: min-amount,
-        price-multiplier: price-multiplier,
-        token-contract: token-contract
-      }
-    )
-    (ok true)
-  )
+;; Add a check for whitelisted tokens
+(define-private (is-whitelisted-token (token-principal principal))
+  (default-to false (map-get? whitelisted-tokens token-principal))
 )
 
 ;; Set oracle address
 (define-public (set-oracle-address (new-oracle principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq new-oracle (var-get oracle-address))) ERR-INVALID-PARAMETER)
     (var-set oracle-address new-oracle)
     (ok true)
   )
@@ -188,31 +178,50 @@
   )
 )
 
-;; Get converted amount
+;; Get converted amount with improved safety
 (define-private (get-converted-amount (currency (string-ascii 10)) (amount uint))
   (match (map-get? supported-currencies {currency: currency})
-    currency-info (ok (* amount (get price-multiplier currency-info)))
+    currency-info 
+      (let 
+        (
+          (multiplier (get price-multiplier currency-info))
+        )
+        (asserts! (get is-active currency-info) ERR-INVALID-CURRENCY)
+        (asserts! (> multiplier u0) ERR-INVALID-CURRENCY)
+        (ok (* amount multiplier))
+      )
     ERR-INVALID-CURRENCY
   )
 )
 
-;; Contribute in any supported currency
+;; Contribute in any supported currency with improved token validation
 (define-public (contribute-in-currency (currency (string-ascii 10)) (token <ft-trait>))
   (let 
     (
+      (token-principal (contract-of token))
       (current-cycle-num (var-get current-cycle))
       (contribution (var-get contribution-amount))
       (member-info (unwrap! (map-get? members tx-sender) ERR-NOT-MEMBER))
       (currency-info (unwrap! (map-get? supported-currencies {currency: currency}) ERR-INVALID-CURRENCY))
     )
+    (asserts! (and (>= (len currency) u1) (<= (len currency) u10)) ERR-INVALID-CURRENCY)
     (asserts! (get is-active member-info) ERR-NOT-MEMBER)
     (asserts! (not (is-eq (get last-contribution-cycle member-info) current-cycle-num)) ERR-ALREADY-MEMBER)
+    (asserts! (>= contribution (get min-amount currency-info)) ERR-INSUFFICIENT-FUNDS)
+    ;; Validate token
+    (asserts! (is-whitelisted-token token-principal) ERR-INVALID-TOKEN)
+    (asserts! (match (get token-principal currency-info)
+                some-principal (is-eq some-principal token-principal)
+                false) 
+              ERR-INVALID-TOKEN)
+    
     (match (get-converted-amount currency contribution)
       converted-amount
         (let
           (
             (final-contribution (- converted-amount (get bonus-balance member-info)))
           )
+          (asserts! (> final-contribution u0) ERR-INSUFFICIENT-FUNDS)
           (if (is-eq currency "STX")
               (match (stx-transfer? final-contribution tx-sender (as-contract tx-sender))
                 success
@@ -255,16 +264,19 @@
   )
 )
 
-;; Withdraw pool funds in preferred currency
+;; Withdraw pool funds with improved token validation
 (define-public (withdraw (token <ft-trait>))
   (let 
     (
+      (token-principal (contract-of token))
       (current-cycle-num (var-get current-cycle))
       (withdrawal-info (unwrap! (map-get? cycle-withdrawals (- current-cycle-num u1)) ERR-CYCLE-NOT-COMPLETE))
       (pool-balance (var-get total-pool-balance))
     )
+    (asserts! (is-whitelisted-token token-principal) ERR-INVALID-TOKEN)
     (asserts! (is-eq (get selected-member withdrawal-info) tx-sender) ERR-INVALID-WITHDRAWAL)
     (asserts! (not (get is-withdrawn withdrawal-info)) ERR-INVALID-WITHDRAWAL)
+    (asserts! (> pool-balance u0) ERR-INSUFFICIENT-FUNDS)
     
     (if (is-eq (get withdrawal-currency withdrawal-info) "STX")
         (match (stx-transfer? pool-balance (as-contract tx-sender) tx-sender)
@@ -314,16 +326,7 @@
   }
 )
 
-;; Convert amount between currencies
-(define-public (convert-amount (currency-from (string-ascii 10)) (currency-to (string-ascii 10)) (amount uint))
-  (let ((result (get-converted-amount currency-from amount)))
-    (match result
-      converted-amount 
-        (match (get-converted-amount currency-to converted-amount)
-          final-amount (ok final-amount)
-          error (err error)
-        )
-      error (err error)
-    )
-  )
+;; Check if a token is whitelisted
+(define-read-only (is-token-whitelisted (token-principal principal))
+  (is-whitelisted-token token-principal)
 )
